@@ -1,0 +1,343 @@
+%{
+	#include <iostream>
+	#include <cstdlib>
+	#include <vector>
+	#include "ast.hpp"
+
+	extern int yylex();
+	extern FILE* yyin;
+
+	extern std::unique_ptr<Module> theModule;
+	extern LLVMContext theContext;
+
+	void yyerror(std::string s) {
+		std::cerr << s << std::endl;
+		theModule.release();
+		exit(1);
+	}
+%}
+
+%union {
+	double val;
+	int ival;
+	std::string *name;
+	ExprAST *e;
+	FunctionAST  *f;
+	std::vector<FunctionAST*> *vf;
+	std::vector<DeclarationExprAST*> *vd;
+	std::vector<ExprAST*> *v;
+	std::vector<std::pair<std::string, Type*> > *vp;
+}
+
+%token class_token program_token static_token le_token and_token
+%token public_token print_token return_token ge_token or_token inc_token
+%token ne_token if_token eq_token else_token for_token while_token dec_token
+
+%token <name> id_token type_token
+%token <val> double_token
+%token <ival> int_token boolconst_token
+
+%type <e> Expression Command Block
+%type <v> CommandArray Body ExpressionArray ExpressionArrayP
+%type <vp> PrototypeArray
+%type <f> Definition
+%type <vf> Code
+%type <vd> DeclarationArray
+
+%nonassoc ')'
+%nonassoc else_token
+
+
+
+
+%right '='
+%left or_token
+%left and_token
+%left ne_token eq_token
+%left '<' '>' le_token ge_token
+%left '+' '-'
+%left '*' '/' '%'
+%right UMINUS '!' inc_token dec_token
+
+
+%%
+
+Program: class_token program_token '{' Code '}' {
+	for (auto e : *$4) {
+		e->codegen();
+		delete e;
+	}
+}
+;
+
+Code: Code Definition {
+		$$ = $1;
+		$$->push_back($2);
+	}
+	| Definition { 
+		$$ = new std::vector<FunctionAST*>();
+		$$->push_back($1);
+	}
+;
+
+Definition: public_token static_token type_token id_token '(' PrototypeArray ')' Body {
+		Type* type = nullptr;
+		if (*$3 == std::string("int")) {
+			type = Type::getInt32Ty(theContext);
+		} else if (*$3 == std::string("double")) {
+			type = Type::getDoubleTy(theContext);
+		} else if (*$3 == std::string("bool")) {
+			type = Type::getInt1Ty(theContext);
+		} else {
+			yyerror("Unknown type!");
+		}
+		$$ = new FunctionAST(*$4, type, $6, $8);
+	}
+;
+
+PrototypeArray: PrototypeArray ',' type_token id_token {
+		$$ = $1;
+		Type* type;
+		if (*$3 == std::string("int")) {
+			type = Type::getInt32Ty(theContext);
+		} else if (*$3 == std::string("double")) {
+			type = Type::getDoubleTy(theContext);
+		} else if (*$3 == std::string("bool")) {
+			type = Type::getInt1Ty(theContext);
+		} else {
+			yyerror("Unknown type!");
+		}
+		$$->push_back(std::make_pair(*$4, type));
+	}
+	| type_token id_token {
+		$$ = new std::vector<std::pair<std::string, Type*>>();
+		Type* type;
+		if (*$1 == std::string("int")) {
+			type = Type::getInt32Ty(theContext);
+		} else if (*$1 == std::string("double")) {
+			type = Type::getDoubleTy(theContext);
+		} else if (*$1 == std::string("bool")) {
+			type = Type::getInt1Ty(theContext);
+		} else {
+			yyerror("Unknown type!");
+		}
+		$$->push_back(std::make_pair(*$2, type));
+		delete $2;
+	}
+	| {
+		$$ = new std::vector<std::pair<std::string, Type*>>();
+	}
+;
+
+Body: '{' CommandArray '}' {
+		$$ = $2;
+	}
+;
+
+CommandArray: CommandArray Command {
+		$$ = $1;
+		$$->push_back($2);
+	}
+	| Command {
+		$$ = new std::vector<ExprAST*>();
+		$$->push_back($1);
+	}
+;
+
+Command: print_token '(' Expression ')' ';'{
+		std::vector<ExprAST*> *tmp = new std::vector<ExprAST*>();
+		tmp->push_back($3);
+		$$ = new CallExprAST("print", tmp);
+	}
+	| type_token DeclarationArray ';'{
+		Type* type;
+		if (*$1 == std::string("bool")) {
+			type = Type::getInt1Ty(theContext);
+		} else if (*$1 == std::string("int")) {
+			type = Type::getInt32Ty(theContext);
+		} else {
+			type = Type::getDoubleTy(theContext);
+		}
+		delete $1;
+
+		$$ = new DeclarationArrayExprAST(type, $2);
+	}
+	| return_token Expression ';'{
+		$$ = new ReturnExprAST($2);
+	}
+	| Expression ';' {
+		$$ = $1;
+	}
+	| Block {
+		$$ = $1;
+	}
+	| if_token '(' Expression ')' Command {
+		$$ = new IfExprAST($3, $5);
+	}
+	| if_token '(' Expression ')' Command else_token Command {
+		$$ = new IfExprAST($3, $5, $7);
+	}
+	| for_token '(' Command  Expression ';' Expression ')' Command {
+		$$ = new ForExprAST($3, $4, $6, $8);
+	}
+	| while_token '(' Expression ')' Command {
+		$$ = new WhileExprAST($3, $5);
+	}
+	| ';'{
+		$$ = new EmptyExprAST();
+	}
+;
+
+Block: '{' CommandArray  '}' {
+	$$ = new BlockExprAST($2);
+}
+;
+
+Expression: Expression '+' Expression {
+		$$ = new BinExprAST('+', $1, $3);
+	}
+	| Expression '-' Expression {
+		$$ = new BinExprAST('-', $1, $3);
+	}
+	| Expression '*' Expression {
+		$$ = new BinExprAST('*', $1, $3);
+	}
+	| Expression '/' Expression {
+		$$ = new BinExprAST('/', $1, $3);
+	}
+	| Expression '%' Expression {
+		$$ = new BinExprAST('%', $1, $3);
+	}
+	| Expression '>' Expression {
+		$$ = new BinExprAST('>', $1, $3);
+	}
+	| Expression '<' Expression {
+		$$ = new BinExprAST('<', $1, $3);
+	}
+	| Expression le_token Expression {
+		$$ = new BinExprAST(256, $1, $3);
+	}
+	| Expression ge_token Expression {
+		$$ = new BinExprAST(257, $1, $3);
+	}
+	| Expression eq_token Expression {
+		$$ = new BinExprAST(258, $1, $3);
+	}
+	| Expression ne_token Expression {
+		$$ = new BinExprAST(259, $1, $3);
+	}
+	| Expression and_token Expression {
+		$$ = new BinExprAST(260, $1, $3);
+	}
+	| Expression or_token Expression {
+		$$ = new BinExprAST(261, $1, $3);
+	}
+	| Expression '=' Expression {
+		$$ = new BinExprAST('=', $1, $3);
+	}
+	| '(' Expression ')' {
+		$$ = $2;
+	}
+	| Expression inc_token {
+		$$ = new UnExprAST(256, $1);
+	}
+	| Expression dec_token {
+		$$ = new UnExprAST(257, $1);
+	}
+	| '-' Expression %prec UMINUS{
+		$$ = new UnExprAST('-', $2);
+	}
+	| '!' Expression {
+		$$ = new UnExprAST('!', $2);
+	}
+	| id_token '(' ExpressionArray ')' {
+		$$ = new CallExprAST(*$1, $3);
+		delete $1;
+	}
+	| double_token {
+		$$ = new NumberExprAST($1);
+	}
+	| int_token {
+		$$ = new INumberExprAST($1);
+	}
+	| boolconst_token {
+		$$ = new BoolExprAST($1);
+	}
+	| id_token {
+		$$ = new VariableExprAST(*$1);
+	}
+;
+
+DeclarationArray: DeclarationArray ',' id_token '=' Expression {
+		$$ = $1;
+		$$->push_back(new DeclarationExprAST(*$3, $5));
+		delete $3;
+	}
+	| DeclarationArray ',' id_token {
+		$$ = $1;
+		$$->push_back(new DeclarationExprAST(*$3, nullptr));
+		delete $3;
+	}
+	| id_token '=' Expression {
+		$$ = new std::vector<DeclarationExprAST*>();
+		$$->push_back(new DeclarationExprAST(*$1, $3));
+		delete $1;
+	}
+	| id_token {
+		$$ = new std::vector<DeclarationExprAST*>();
+		$$->push_back(new DeclarationExprAST(*$1, nullptr));
+		delete $1;
+	}
+;
+
+ExpressionArray: ExpressionArrayP {
+		$$ = $1;
+	}
+	|	{
+		$$ = new std::vector<ExprAST*>();
+	}
+;
+
+ExpressionArrayP: ExpressionArrayP ',' Expression {
+		$$ = $1;
+		$$->push_back($3);
+	}
+	| Expression {
+		$$ = new std::vector<ExprAST*>();
+		$$->push_back($1);
+	}
+;
+
+%%
+
+int main (int argc, char** argv) {
+	if (argc != 2) {
+		std::cerr << "Input not specified!" << std::endl;
+		exit(1);
+	}
+
+	//redirecting input
+	yyin = fopen(argv[1], "r");
+
+	InitializeNativeTarget();
+	InitializeNativeTargetAsmPrinter();
+	InitializeNativeTargetAsmParser();
+
+	initializeModule();
+
+	//adding print declaration
+	std::vector<Type*> v(1, Type::getDoubleTy(theContext));
+	FunctionType* fp = FunctionType::get(Type::getVoidTy(theContext), v, false);
+	Function* f = Function::Create(fp, Function::ExternalLinkage, "print", theModule.get());
+
+	(void) f;
+
+	yyparse();
+
+	theModule->dump();
+
+	std::cerr << "; end of Module" << std::endl;
+	fclose(yyin);
+	theModule.release();
+	return 0;
+}
